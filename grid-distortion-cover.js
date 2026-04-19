@@ -45,6 +45,16 @@ function getSafariTotalZoom(element) {
   return totalZoom;
 }
 
+/** 0 cover, 1 contain, 2 fill — как CSS object-fit */
+function normalizeObjectFit(value) {
+  const v = String(value || 'cover')
+    .trim()
+    .toLowerCase();
+  if (v === 'contain') return 1;
+  if (v === 'fill') return 2;
+  return 0;
+}
+
 const vertexShader = `
 uniform float time;
 varying vec2 vUv;
@@ -56,29 +66,55 @@ void main() {
 }
 `;
 
-/** Как CSS object-fit: cover — центр кадра, обрезка по длинной стороне */
+/** uObjectFit: 0=cover, 1=contain, 2=fill (растянуть как object-fit: fill) */
 const fragmentShader = `
 uniform sampler2D uDataTexture;
 uniform sampler2D uTexture;
 uniform vec4 resolution;
 uniform float uImageAspect;
 uniform float uContainerAspect;
+uniform float uObjectFit;
 varying vec2 vUv;
 
-vec2 coverUV(vec2 uv) {
+const float FIT_COVER = 0.0;
+const float FIT_CONTAIN = 1.0;
+const float FIT_FILL = 2.0;
+
+vec2 mapTextureUV(vec2 uv) {
   float ia = max(uImageAspect, 0.0001);
   float ca = max(uContainerAspect, 0.0001);
+
+  if (abs(uObjectFit - FIT_FILL) < 0.01) {
+    return uv;
+  }
+
+  if (abs(uObjectFit - FIT_CONTAIN) < 0.01) {
+    if (ia > ca) {
+      float band = ca / ia;
+      float v0 = (1.0 - band) * 0.5;
+      if (uv.y < v0 || uv.y > 1.0 - v0) return vec2(-1.0);
+      return vec2(uv.x, (uv.y - v0) / band);
+    }
+    float band = ia / ca;
+    float u0 = (1.0 - band) * 0.5;
+    if (uv.x < u0 || uv.x > 1.0 - u0) return vec2(-1.0);
+    return vec2((uv.x - u0) / band, uv.y);
+  }
+
   if (ia > ca) {
     float a = ca / ia;
     return vec2(uv.x * a + (1.0 - a) * 0.5, uv.y);
-  } else {
-    float a = ia / ca;
-    return vec2(uv.x, uv.y * a + (1.0 - a) * 0.5);
   }
+  float a = ia / ca;
+  return vec2(uv.x, uv.y * a + (1.0 - a) * 0.5);
 }
 
 void main() {
-  vec2 uv = coverUV(vUv);
+  vec2 uv = mapTextureUV(vUv);
+  if (uv.x < -0.5) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
   vec4 offset = texture2D(uDataTexture, vUv);
   gl_FragColor = texture2D(uTexture, uv - 0.02 * offset.rg);
 }
@@ -95,6 +131,7 @@ class GridDistortion {
       relaxation: options.relaxation || 0.9,
       imageSrc: options.imageSrc || 'https://mods.tistols.com/mods/grid-distortion/grid-distortion-background-example.jpg',
       className: options.className || '',
+      objectFit: normalizeObjectFit(options.objectFit),
     };
 
     this.scene = null;
@@ -156,6 +193,7 @@ class GridDistortion {
       uDataTexture: { value: null },
       uImageAspect: { value: 1 },
       uContainerAspect: { value: 1 },
+      uObjectFit: { value: this.config.objectFit },
     };
 
     const textureLoader = new THREE.TextureLoader();
@@ -245,6 +283,7 @@ class GridDistortion {
     this.containerAspect = width / height;
     this.uniforms.uContainerAspect.value = this.containerAspect;
     this.uniforms.uImageAspect.value = this.imageAspect;
+    this.uniforms.uObjectFit.value = this.config.objectFit;
 
     this.renderer.setSize(width, height);
 
