@@ -117,6 +117,11 @@ vec2 mapTextureUV(vec2 uv) {
     return uv;
   }
 
+  /* Совпадение пропорций картинки и блока — без кропа (иначе float даёт лишний сдвиг) */
+  if (abs(ia - ca) < 0.002) {
+    return uv;
+  }
+
   if (abs(uObjectFit - FIT_CONTAIN) < 0.01) {
     if (ia > ca) {
       float band = ca / ia;
@@ -283,8 +288,9 @@ class GridDistortion {
     const size = this.config.grid;
     const data = new Float32Array(4 * size * size);
     for (let i = 0; i < size * size; i++) {
-      data[i * 4] = Math.random() * 255 - 125;
-      data[i * 4 + 1] = Math.random() * 255 - 125;
+      /* Было random*255: в шейдере uv -= 0.02*offset — картинка «уезжала» и казалась зумом/сдвигом */
+      data[i * 4] = 0;
+      data[i * 4 + 1] = 0;
     }
 
     this.dataTexture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.FloatType);
@@ -324,8 +330,8 @@ class GridDistortion {
     if (!this.container || !this.renderer || !this.camera) return;
 
     const rect = this.container.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
+    const width = Math.max(1, Math.round(rect.width));
+    const height = Math.max(1, Math.round(rect.height));
 
     if (width === 0 || height === 0) return;
 
