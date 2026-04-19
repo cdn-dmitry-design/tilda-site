@@ -55,6 +55,34 @@ function normalizeObjectFit(value) {
   return 0;
 }
 
+function isTruthyAttr(value) {
+  if (value === true || value === '') return true;
+  if (value === false || value == null) return false;
+  const s = String(value).trim().toLowerCase();
+  return s === 'true' || s === '1' || s === 'yes';
+}
+
+/** Реальные пропорции картинки до WebGL-текстуры — иначе cover считался с ia=1 и «ломал» кадр */
+function preloadImageAspect(url, onAspect, onFail) {
+  const run = (useCors) => {
+    const img = new Image();
+    if (useCors) img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      if (w > 0 && h > 0) {
+        onAspect(w / h);
+      } else if (onFail) onFail();
+    };
+    img.onerror = () => {
+      if (useCors) run(false);
+      else if (onFail) onFail();
+    };
+    img.src = url;
+  };
+  run(true);
+}
+
 const vertexShader = `
 uniform float time;
 varying vec2 vUv;
@@ -74,6 +102,7 @@ uniform vec4 resolution;
 uniform float uImageAspect;
 uniform float uContainerAspect;
 uniform float uObjectFit;
+uniform float uTextureReady;
 varying vec2 vUv;
 
 const float FIT_COVER = 0.0;
@@ -110,11 +139,16 @@ vec2 mapTextureUV(vec2 uv) {
 }
 
 void main() {
+  if (uTextureReady < 0.5) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
   vec2 uv = mapTextureUV(vUv);
   if (uv.x < -0.5) {
     gl_FragColor = vec4(0.0);
     return;
   }
+  uv = clamp(uv, 0.001, 0.999);
   vec4 offset = texture2D(uDataTexture, vUv);
   gl_FragColor = texture2D(uTexture, uv - 0.02 * offset.rg);
 }
@@ -132,6 +166,7 @@ class GridDistortion {
       imageSrc: options.imageSrc || 'https://mods.tistols.com/mods/grid-distortion/grid-distortion-background-example.jpg',
       className: options.className || '',
       objectFit: normalizeObjectFit(options.objectFit),
+      skipParentLayout: isTruthyAttr(options.skipParentLayout),
     };
 
     this.scene = null;
@@ -194,10 +229,23 @@ class GridDistortion {
       uImageAspect: { value: 1 },
       uContainerAspect: { value: 1 },
       uObjectFit: { value: this.config.objectFit },
+      uTextureReady: { value: 0 },
     };
 
     const textureLoader = new THREE.TextureLoader();
     if (this.config.imageSrc) {
+      preloadImageAspect(
+        this.config.imageSrc,
+        (aspect) => {
+          this.imageAspect = aspect;
+          if (this.uniforms) {
+            this.uniforms.uImageAspect.value = aspect;
+            this.handleResize();
+          }
+        },
+        undefined
+      );
+
       const applyTexture = (texture) => {
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
@@ -208,6 +256,7 @@ class GridDistortion {
         this.uniforms.uImageAspect.value = this.imageAspect;
 
         this.uniforms.uTexture.value = texture;
+        this.uniforms.uTextureReady.value = 1;
 
         this.handleResize();
       };
@@ -460,9 +509,10 @@ function initGridDistortionContainers() {
     if (distortionInitialized.has(container)) return;
 
     const settings = getSettingsFromDataAttributes(container);
+    const skipLayout = isTruthyAttr(settings.skipParentLayout);
 
     const parentDiv = container.parentElement;
-    if (parentDiv) {
+    if (parentDiv && !skipLayout) {
       parentDiv.style.position = 'absolute';
       parentDiv.style.top = '0';
       parentDiv.style.bottom = '0';
@@ -472,8 +522,10 @@ function initGridDistortionContainers() {
       parentDiv.style.minHeight = '100%';
     }
 
-    const minVh = parseFloat(container.dataset.minHeightVh || '60') || 60;
-    ensureAncestorsMinHeight(container, minVh);
+    if (!skipLayout) {
+      const minVh = parseFloat(container.dataset.minHeightVh || '60') || 60;
+      ensureAncestorsMinHeight(container, minVh);
+    }
 
     const zeroBlock = parentDiv?.parentElement?.parentElement;
     const distortionImg = zeroBlock?.querySelector('.distortion-img img');
