@@ -101,28 +101,23 @@ uniform sampler2D uTexture;
 uniform vec4 resolution;
 uniform float uImageAspect;
 uniform float uContainerAspect;
-uniform float uObjectFit;
+uniform int uFitMode;
 uniform float uTextureReady;
 varying vec2 vUv;
-
-const float FIT_COVER = 0.0;
-const float FIT_CONTAIN = 1.0;
-const float FIT_FILL = 2.0;
 
 vec2 mapTextureUV(vec2 uv) {
   float ia = max(uImageAspect, 0.0001);
   float ca = max(uContainerAspect, 0.0001);
 
-  if (abs(uObjectFit - FIT_FILL) < 0.01) {
+  if (uFitMode == 2) {
     return uv;
   }
 
-  /* Совпадение пропорций картинки и блока — без кропа (иначе float даёт лишний сдвиг) */
-  if (abs(ia - ca) < 0.002) {
+  if (abs(ia - ca) < 0.0005) {
     return uv;
   }
 
-  if (abs(uObjectFit - FIT_CONTAIN) < 0.01) {
+  if (uFitMode == 1) {
     if (ia > ca) {
       float band = ca / ia;
       float v0 = (1.0 - band) * 0.5;
@@ -233,7 +228,7 @@ class GridDistortion {
       uDataTexture: { value: null },
       uImageAspect: { value: 1 },
       uContainerAspect: { value: 1 },
-      uObjectFit: { value: this.config.objectFit },
+      uFitMode: { value: Math.min(2, Math.max(0, Math.round(this.config.objectFit))) },
       uTextureReady: { value: 0 },
     };
 
@@ -329,18 +324,24 @@ class GridDistortion {
   handleResize() {
     if (!this.container || !this.renderer || !this.camera) return;
 
-    const rect = this.container.getBoundingClientRect();
-    const width = Math.max(1, Math.round(rect.width));
-    const height = Math.max(1, Math.round(rect.height));
+    const el = this.container;
+    const width = Math.max(1, Math.round(el.clientWidth || el.getBoundingClientRect().width));
+    const height = Math.max(1, Math.round(el.clientHeight || el.getBoundingClientRect().height));
 
     if (width === 0 || height === 0) return;
 
     this.containerAspect = width / height;
     this.uniforms.uContainerAspect.value = this.containerAspect;
     this.uniforms.uImageAspect.value = this.imageAspect;
-    this.uniforms.uObjectFit.value = this.config.objectFit;
+    this.uniforms.uFitMode.value = Math.min(2, Math.max(0, Math.round(this.config.objectFit)));
 
-    this.renderer.setSize(width, height);
+    /* false: не задаём canvas px измерением — иначе браузер тянет bitmap относительно CSS 100%×100% */
+    this.renderer.setSize(width, height, false);
+    const canvas = this.renderer.domElement;
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.display = 'block';
+    canvas.style.boxSizing = 'border-box';
 
     if (this.plane) {
       this.plane.scale.set(this.containerAspect, 1, 1);
@@ -494,6 +495,55 @@ class GridDistortion {
 const distortionInitialized = new WeakSet();
 
 /**
+ * Класс на обычном <img> в Тильде: вставляем .distortion-container, src берём с картинки, картинку скрываем.
+ * Параметры эффекта — data-* на том же img (скопируются в контейнер): data-grid, data-mouse, data-object-fit и т.д.
+ */
+const DISTORTION_IMG_CLASS = 'grid-distortion-photo';
+
+function upgradeMarkedImagesToDistortionContainers() {
+  document.querySelectorAll(`img.${DISTORTION_IMG_CLASS}`).forEach((img) => {
+    if (img.dataset.distortionUpgraded === '1' || !img.getAttribute('src')) return;
+
+    const container = document.createElement('div');
+    container.className = 'distortion-container';
+    container.dataset.skipParentLayout = 'true';
+
+    Object.keys(img.dataset).forEach((key) => {
+      if (key === 'distortionUpgraded') return;
+      container.dataset[key] = img.dataset[key];
+    });
+
+    container.dataset.imageSrc = img.currentSrc || img.src || '';
+
+    container.style.width = '100%';
+    container.style.height = '100%';
+    container.style.position = 'relative';
+    container.style.overflow = 'hidden';
+    container.style.boxSizing = 'border-box';
+
+    const applyAspectFromImage = () => {
+      const nw = img.naturalWidth;
+      const nh = img.naturalHeight;
+      if (nw > 0 && nh > 0) {
+        container.style.aspectRatio = `${nw} / ${nh}`;
+        container.style.height = 'auto';
+      }
+    };
+
+    img.insertAdjacentElement('beforebegin', container);
+    img.dataset.distortionUpgraded = '1';
+    img.setAttribute('aria-hidden', 'true');
+    img.style.display = 'none';
+
+    if (img.complete) {
+      applyAspectFromImage();
+    } else {
+      img.addEventListener('load', applyAspectFromImage, { once: true });
+    }
+  });
+}
+
+/**
  * В Тильде цепочка height:100% часто даёт 0px: у absolute-обёртки нет опорной высоты.
  * Даём предкам min-height, иначе canvas WebGL получает размер 0×0.
  */
@@ -515,9 +565,12 @@ function initGridDistortionContainers() {
     if (distortionInitialized.has(container)) return;
 
     const settings = getSettingsFromDataAttributes(container);
-    const skipLayout = isTruthyAttr(settings.skipParentLayout);
-
     const parentDiv = container.parentElement;
+    /* Родитель <a>: иначе скрипт делает ссылку absolute — часто ломает ширину/пропорции в Тильде */
+    const forceParent = isTruthyAttr(settings.forceParentLayout);
+    const skipLayout =
+      isTruthyAttr(settings.skipParentLayout) || (parentDiv?.tagName === 'A' && !forceParent);
+
     if (parentDiv && !skipLayout) {
       parentDiv.style.position = 'absolute';
       parentDiv.style.top = '0';
@@ -547,13 +600,19 @@ function initGridDistortionContainers() {
 }
 
 let distortionMoTimer = null;
-function scheduleGridDistortionInit() {
+
+function runDistortionPipeline() {
+  upgradeMarkedImagesToDistortionContainers();
   initGridDistortionContainers();
-  requestAnimationFrame(() => initGridDistortionContainers());
-  setTimeout(initGridDistortionContainers, 0);
-  setTimeout(initGridDistortionContainers, 100);
-  setTimeout(initGridDistortionContainers, 500);
-  setTimeout(initGridDistortionContainers, 1500);
+}
+
+function scheduleGridDistortionInit() {
+  runDistortionPipeline();
+  requestAnimationFrame(() => runDistortionPipeline());
+  setTimeout(runDistortionPipeline, 0);
+  setTimeout(runDistortionPipeline, 100);
+  setTimeout(runDistortionPipeline, 500);
+  setTimeout(runDistortionPipeline, 1500);
 }
 
 function setupDistortionMutationObserver() {
